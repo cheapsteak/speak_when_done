@@ -61,13 +61,67 @@ def list_voices() -> dict:
     }
 
 
+# In-process CoreAudio device-property reads go STALE in long-lived processes:
+# a process that queries device properties but never runs a CoreAudio run loop
+# accumulates a stale HAL cache and misses some mic on/off transitions — so a
+# long-running server can speak over a live meeting. A brand-new process builds
+# a fresh HAL client and always reads the current state. Long-lived callers
+# (the MCP server) set MIC_CHECK_FRESH = True; short-lived CLI/library callers
+# leave it False — they are already fresh, and the subprocess only adds ~0.1 s.
+MIC_CHECK_FRESH = False
+
+
 def is_microphone_active() -> bool:
     """
     Check if any microphone is currently in use on macOS.
 
     Uses CoreAudio API to query all audio input devices.
-    Returns False on non-macOS platforms.
+    Returns False on non-macOS platforms. When MIC_CHECK_FRESH is set,
+    delegates to a fresh subprocess to dodge the stale-HAL-cache bug
+    documented on that flag.
     """
+    if sys.platform != "darwin":
+        return False
+    if MIC_CHECK_FRESH:
+        fresh = _microphone_active_subprocess()
+        if fresh is not None:
+            return fresh
+        # Subprocess failed — fall back to the in-process query rather than
+        # silently un-suppressing (returning a hard False).
+    return _microphone_active_native()
+
+
+def _microphone_active_subprocess() -> bool | None:
+    """Run the CoreAudio mic query in a fresh interpreter; None on failure.
+
+    A brand-new process has no stale HAL cache, so its reading is always
+    current. Reuses _microphone_active_native() (single source of truth for
+    the CoreAudio logic). Returns None (not False) on any failure so the
+    caller can fall back rather than treating a crash as "mic is off".
+    """
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import speak_when_done as s; "
+                "print(1 if s._microphone_active_native() else 0)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    out = proc.stdout.strip()
+    if proc.returncode != 0 or out not in ("0", "1"):
+        return None
+    return out == "1"
+
+
+def _microphone_active_native() -> bool:
+    """CoreAudio query in the CURRENT process (may be stale in a long-lived
+    process — see MIC_CHECK_FRESH)."""
     if sys.platform != "darwin":
         return False
 

@@ -13,6 +13,13 @@ from mcp.server.fastmcp import FastMCP
 from . import speak as speak_fn
 from . import list_voices as list_voices_fn
 
+# The MCP server is long-lived, so its in-process CoreAudio mic reads go stale
+# (see MIC_CHECK_FRESH in __init__.py) — delegate mic checks to a fresh
+# subprocess so meeting suppression stays accurate for days-old servers.
+import speak_when_done as _swd
+
+_swd.MIC_CHECK_FRESH = True
+
 # Configure logging to stderr (never stdout - it corrupts JSON-RPC)
 logging.basicConfig(
     level=logging.INFO,
